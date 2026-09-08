@@ -44,6 +44,7 @@ public final class AWSImageCompressor {
         let cancellation = AWSImageCompressionCancellation()
         return try await withTaskCancellationHandler {
             try await runOnCompressionQueue(cancellation: cancellation) {
+                try options.validate()
                 guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
                     throw AWSImageCompressionError.decodingFailed
                 }
@@ -72,6 +73,7 @@ public final class AWSImageCompressor {
         let cancellation = AWSImageCompressionCancellation()
         return try await withTaskCancellationHandler {
             try await runOnCompressionQueue(cancellation: cancellation) {
+                try options.validate()
                 guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, nil) else {
                     throw AWSImageCompressionError.decodingFailed
                 }

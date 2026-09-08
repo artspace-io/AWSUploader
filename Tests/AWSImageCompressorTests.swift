@@ -26,7 +26,9 @@ final class AWSImageCompressorTests: XCTestCase {
 
         let result = try await AWSImageCompressor().compress(image)
         let output = try XCTUnwrap(UIImage(data: result.data))
-        let color = try XCTUnwrap(pixelColor(image: output, x: 10, y: 10))
+        let color = try XCTUnwrap(
+            pixelColor(image: output, xCoordinate: 10, yCoordinate: 10)
+        )
         XCTAssertGreaterThan(color.red, 0.9)
         XCTAssertGreaterThan(color.green, 0.9)
         XCTAssertGreaterThan(color.blue, 0.9)
@@ -63,19 +65,30 @@ final class AWSImageCompressorTests: XCTestCase {
         }
     }
 
-    private func pixelColor(image: UIImage, x: Int, y: Int) -> (red: CGFloat, green: CGFloat, blue: CGFloat)? {
+    private func pixelColor(
+        image: UIImage,
+        xCoordinate: Int,
+        yCoordinate: Int
+    ) -> PixelComponents? {
         guard let cgImage = image.cgImage,
               let dataProvider = cgImage.dataProvider,
               let data = dataProvider.data,
               let bytes = CFDataGetBytePtr(data) else {
             return nil
         }
-        let offset = y * cgImage.bytesPerRow + x * cgImage.bitsPerPixel / 8
+        let offset = yCoordinate * cgImage.bytesPerRow
+            + xCoordinate * cgImage.bitsPerPixel / 8
         guard offset + 2 < CFDataGetLength(data) else { return nil }
-        return (
-            CGFloat(bytes[offset]) / 255,
-            CGFloat(bytes[offset + 1]) / 255,
-            CGFloat(bytes[offset + 2]) / 255
+        return PixelComponents(
+            red: CGFloat(bytes[offset]) / 255,
+            green: CGFloat(bytes[offset + 1]) / 255,
+            blue: CGFloat(bytes[offset + 2]) / 255
         )
+    }
+
+    private struct PixelComponents {
+        let red: CGFloat
+        let green: CGFloat
+        let blue: CGFloat
     }
 }

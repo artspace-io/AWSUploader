@@ -14,7 +14,7 @@ public final class AWSImageUploadTask {
     private let operation: Task<AWSUploadResult, Error>
     private let cancellation: AWSImageUploadCancellation
 
-    init(
+    fileprivate init(
         id: UUID,
         progress: AsyncStream<AWSImageUploadProgress>,
         operation: Task<AWSUploadResult, Error>,

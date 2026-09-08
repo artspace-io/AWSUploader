@@ -3,11 +3,6 @@ import Foundation
 import UIKit
 
 public final class AWSUploader {
-    private enum UploadSource {
-        case data(Data)
-        case file(URL)
-    }
-
     private let configuration: AWSUploadConfiguration
     private let credentialStore: AWSCredentialStore
     private let registrationCoordinator: AWSRegistrationCoordinator
@@ -64,7 +59,7 @@ public final class AWSUploader {
     }
 
     private func makeUploadTask(
-        source: UploadSource,
+        source: AWSUploadSource,
         objectName: String,
         contentType: String
     ) -> AWSUploadTask {
@@ -98,9 +93,11 @@ public final class AWSUploader {
             cancellationController: cancellationController
         )
     }
+}
 
+extension AWSUploader {
     private func performUpload(
-        source: UploadSource,
+        source: AWSUploadSource,
         objectName: String,
         contentType: String,
         progressEmitter: AWSUploadProgressEmitter,
@@ -114,16 +111,17 @@ public final class AWSUploader {
             try Task.checkCancellation()
             let credentials = try await credentialStore.credentials(forceRefresh: attempt > 0)
             let objectKey = try Self.objectKey(prefix: credentials.keyPrefix, objectName: objectName)
+            let context = AWSUploadContext(
+                source: source,
+                utility: utility,
+                objectKey: objectKey,
+                contentType: contentType,
+                progressEmitter: progressEmitter,
+                cancellationController: cancellationController
+            )
 
             do {
-                try await uploadOnce(
-                    source: source,
-                    utility: utility,
-                    objectKey: objectKey,
-                    contentType: contentType,
-                    progressEmitter: progressEmitter,
-                    cancellationController: cancellationController
-                )
+                try await uploadOnce(context: context)
                 return AWSUploadResult(bucket: configuration.bucket, objectKey: objectKey)
             } catch {
                 if attempt == 0, Self.isAuthenticationError(error) {
@@ -137,91 +135,118 @@ public final class AWSUploader {
         throw AWSUploaderError.invalidCredentials
     }
 
-    private func uploadOnce(
-        source: UploadSource,
-        utility: AWSS3TransferUtility,
-        objectKey: String,
-        contentType: String,
-        progressEmitter: AWSUploadProgressEmitter,
-        cancellationController: AWSUploadCancellationController
-    ) async throws {
+    private func uploadOnce(context: AWSUploadContext) async throws {
         try await withTaskCancellationHandler {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { continuation in
                 let completionGate = AWSCompletionGate()
-                let expression = AWSS3TransferUtilityUploadExpression()
-                expression.progressBlock = { _, progress in
-                    progressEmitter.yield(progress)
-                }
-                let completion: AWSS3TransferUtilityUploadCompletionHandlerBlock = { _, error in
-                    if cancellationController.isCancelled {
-                        completionGate.finish {
-                            continuation.resume(throwing: AWSUploaderError.cancelled)
-                        }
-                    } else if let error {
-                        completionGate.finish {
-                            continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
-                        }
-                    } else {
-                        completionGate.finish {
-                            continuation.resume()
-                        }
-                    }
-                }
-
-                let creationTask: AWSTask<AWSS3TransferUtilityUploadTask>
-                switch source {
-                case .data(let data):
-                    creationTask = utility.uploadData(
-                        data,
-                        bucket: configuration.bucket,
-                        key: objectKey,
-                        contentType: contentType,
-                        expression: expression,
-                        completionHandler: completion
-                    )
-                case .file(let fileURL):
-                    creationTask = utility.uploadFile(
-                        fileURL,
-                        bucket: configuration.bucket,
-                        key: objectKey,
-                        contentType: contentType,
-                        expression: expression,
-                        completionHandler: completion
-                    )
-                }
-
-                creationTask.continueWith { task in
-                    if let uploadTask = task.result {
-                        cancellationController.register(uploadTask)
-                    }
-                    if cancellationController.isCancelled || task.isCancelled {
-                        completionGate.finish {
-                            continuation.resume(throwing: AWSUploaderError.cancelled)
-                        }
-                    } else if let error = task.error {
-                        completionGate.finish {
-                            continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
-                        }
-                    } else if task.result == nil {
-                        completionGate.finish {
-                            let error = NSError(
-                                domain: "AWSUploader",
-                                code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "AWS did not create an upload task."]
-                            )
-                            continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
-                        }
-                    }
-                    return nil
-                }
+                let creationTask = makeAWSTask(
+                    context: context,
+                    completionGate: completionGate,
+                    continuation: continuation
+                )
+                observeCreation(
+                    task: creationTask,
+                    context: context,
+                    completionGate: completionGate,
+                    continuation: continuation
+                )
             }
         } onCancel: {
-            cancellationController.cancel()
+            context.cancellationController.cancel()
         }
     }
 
-    private func validate(source: UploadSource, objectName: String, contentType: String) throws {
+    private func makeAWSTask(
+        context: AWSUploadContext,
+        completionGate: AWSCompletionGate,
+        continuation: CheckedContinuation<Void, Error>
+    ) -> AWSTask<AWSS3TransferUtilityUploadTask> {
+        let expression = AWSS3TransferUtilityUploadExpression()
+        expression.progressBlock = { _, progress in
+            context.progressEmitter.yield(progress)
+        }
+        let completion: AWSS3TransferUtilityUploadCompletionHandlerBlock = { _, error in
+            Self.completeUpload(
+                error: error,
+                cancellationController: context.cancellationController,
+                completionGate: completionGate,
+                continuation: continuation
+            )
+        }
+
+        switch context.source {
+        case .data(let data):
+            return context.utility.uploadData(
+                data,
+                bucket: configuration.bucket,
+                key: context.objectKey,
+                contentType: context.contentType,
+                expression: expression,
+                completionHandler: completion
+            )
+        case .file(let fileURL):
+            return context.utility.uploadFile(
+                fileURL,
+                bucket: configuration.bucket,
+                key: context.objectKey,
+                contentType: context.contentType,
+                expression: expression,
+                completionHandler: completion
+            )
+        }
+    }
+
+    private static func completeUpload(
+        error: Error?,
+        cancellationController: AWSUploadCancellationController,
+        completionGate: AWSCompletionGate,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        completionGate.finish {
+            if cancellationController.isCancelled {
+                continuation.resume(throwing: AWSUploaderError.cancelled)
+            } else if let error {
+                continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
+            } else {
+                continuation.resume()
+            }
+        }
+    }
+
+    private func observeCreation(
+        task: AWSTask<AWSS3TransferUtilityUploadTask>,
+        context: AWSUploadContext,
+        completionGate: AWSCompletionGate,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        task.continueWith { task in
+            if let uploadTask = task.result {
+                context.cancellationController.register(uploadTask)
+            }
+            if context.cancellationController.isCancelled || task.isCancelled {
+                completionGate.finish {
+                    continuation.resume(throwing: AWSUploaderError.cancelled)
+                }
+            } else if let error = task.error {
+                completionGate.finish {
+                    continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
+                }
+            } else if task.result == nil {
+                completionGate.finish {
+                    let error = NSError(
+                        domain: "AWSUploader",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "AWS did not create an upload task."]
+                    )
+                    continuation.resume(throwing: AWSUploaderError.uploadFailed(error))
+                }
+            }
+            return nil
+        }
+    }
+
+    private func validate(source: AWSUploadSource, objectName: String, contentType: String) throws {
         guard !objectName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AWSUploaderError.invalidObjectName
         }
@@ -258,6 +283,20 @@ public final class AWSUploader {
         ]
         return markers.contains { details.contains($0) }
     }
+}
+
+private enum AWSUploadSource {
+    case data(Data)
+    case file(URL)
+}
+
+private struct AWSUploadContext {
+    let source: AWSUploadSource
+    let utility: AWSS3TransferUtility
+    let objectKey: String
+    let contentType: String
+    let progressEmitter: AWSUploadProgressEmitter
+    let cancellationController: AWSUploadCancellationController
 }
 
 private final class AWSCompletionGate {

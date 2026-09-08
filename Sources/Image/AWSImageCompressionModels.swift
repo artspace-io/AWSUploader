@@ -111,7 +111,7 @@ public enum AWSImageCompressionError: LocalizedError {
             return "The image could not be rendered."
         case .encodingFailed:
             return "The image could not be encoded as JPEG."
-        case .targetByteCountNotReached(let actual, let target):
+        case let .targetByteCountNotReached(actual, target):
             return "The compressed image is \(actual) bytes, exceeding the \(target)-byte limit."
         case .cancelled:
             return "Image compression was cancelled."

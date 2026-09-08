@@ -37,42 +37,21 @@ actor AWSRegistrationCoordinator {
         let credentialProvider = self.credentialProvider
         let utilityKey = self.utilityKey
         let task = Task<Void, Error> {
-            let region = configuration.region.aws_regionTypeValue()
-            guard region != .Unknown else {
-                throw AWSUploaderError.invalidConfiguration("Unknown AWS region: \(configuration.region)")
-            }
-            guard !configuration.bucket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw AWSUploaderError.invalidConfiguration("Bucket must not be empty.")
-            }
-            guard configuration.credentialRefreshAhead >= 0,
-                  configuration.requestTimeout > 0,
-                  configuration.resourceTimeout > 0 else {
-                throw AWSUploaderError.invalidConfiguration("Timeout and refresh values are invalid.")
-            }
-            guard let serviceConfiguration = AWSServiceConfiguration(
-                region: region,
-                credentialsProvider: credentialProvider
-            ) else {
-                throw AWSUploaderError.invalidConfiguration("AWS service configuration could not be created.")
-            }
-            serviceConfiguration.timeoutIntervalForRequest = configuration.requestTimeout
-            serviceConfiguration.timeoutIntervalForResource = configuration.resourceTimeout
-
-            do {
-                try await withCheckedThrowingContinuation { continuation in
-                    AWSS3TransferUtility.register(
-                        with: serviceConfiguration,
-                        forKey: utilityKey
-                    ) { error in
-                        if let error {
-                            continuation.resume(throwing: AWSUploaderError.registrationFailed(error))
-                        } else {
-                            continuation.resume()
-                        }
+            let serviceConfiguration = try Self.makeServiceConfiguration(
+                configuration: configuration,
+                credentialProvider: credentialProvider
+            )
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                AWSS3TransferUtility.register(
+                    with: serviceConfiguration,
+                    forKey: utilityKey
+                ) { error in
+                    if let error {
+                        continuation.resume(throwing: AWSUploaderError.registrationFailed(error))
+                    } else {
+                        continuation.resume()
                     }
                 }
-            } catch {
-                throw error
             }
         }
         registrationTask = task
@@ -85,5 +64,32 @@ actor AWSRegistrationCoordinator {
             registrationTask = nil
             throw error
         }
+    }
+
+    private static func makeServiceConfiguration(
+        configuration: AWSUploadConfiguration,
+        credentialProvider: AWSDynamicCredentialsProvider
+    ) throws -> AWSServiceConfiguration {
+        let region = configuration.region.aws_regionTypeValue()
+        guard region != .Unknown else {
+            throw AWSUploaderError.invalidConfiguration("Unknown AWS region: \(configuration.region)")
+        }
+        guard !configuration.bucket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AWSUploaderError.invalidConfiguration("Bucket must not be empty.")
+        }
+        guard configuration.credentialRefreshAhead >= 0,
+              configuration.requestTimeout > 0,
+              configuration.resourceTimeout > 0 else {
+            throw AWSUploaderError.invalidConfiguration("Timeout and refresh values are invalid.")
+        }
+        guard let serviceConfiguration = AWSServiceConfiguration(
+            region: region,
+            credentialsProvider: credentialProvider
+        ) else {
+            throw AWSUploaderError.invalidConfiguration("AWS service configuration could not be created.")
+        }
+        serviceConfiguration.timeoutIntervalForRequest = configuration.requestTimeout
+        serviceConfiguration.timeoutIntervalForResource = configuration.resourceTimeout
+        return serviceConfiguration
     }
 }
