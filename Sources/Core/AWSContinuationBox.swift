@@ -15,16 +15,20 @@ import Foundation
 /// - **重复 resume**：`AWSS3TransferUtility.register` 会把同一个 completionHandler
 ///   同时交给 `init` 和 `recover:`，存在被调用两次的可能；裸 continuation 遇到这种情况
 ///   会直接崩（SWIFT TASK CONTINUATION MISUSE），这里第二次起静默丢弃。
-final class AWSContinuationBox<Value>: @unchecked Sendable {
+/// **行为契约（对外承诺，改动会破坏调用方）**：第一个到达的结果胜出，
+/// 其余的 resolve 一律静默丢弃 —— 包括「结果早于 continuation 安装」时先存下来的那个。
+public final class AWSContinuationBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
     private var pendingResult: Result<Value, Error>?
     private var isFinished = false
 
+    public init() {}
+
     /// - Returns: `false` 表示结果早于 continuation 抵达，方法内部已经 resume，
     ///   调用方应当直接返回，不要再启动真正的异步操作。
     @discardableResult
-    func install(_ continuation: CheckedContinuation<Value, Error>) -> Bool {
+    public func install(_ continuation: CheckedContinuation<Value, Error>) -> Bool {
         lock.lock()
         if let pendingResult {
             isFinished = true
@@ -38,7 +42,7 @@ final class AWSContinuationBox<Value>: @unchecked Sendable {
         return true
     }
 
-    func resolve(_ result: Result<Value, Error>) {
+    public func resolve(_ result: Result<Value, Error>) {
         lock.lock()
         // pendingResult 也要挡：结果早于安装时同样是"第一个结果胜出"，
         // 否则 onCancel 先存下的 .cancelled 会被随后到达的回调覆盖掉
@@ -57,11 +61,11 @@ final class AWSContinuationBox<Value>: @unchecked Sendable {
         lock.unlock()
     }
 
-    func succeed(_ value: Value) {
+    public func succeed(_ value: Value) {
         resolve(.success(value))
     }
 
-    func fail(_ error: Error) {
+    public func fail(_ error: Error) {
         resolve(.failure(error))
     }
 }
