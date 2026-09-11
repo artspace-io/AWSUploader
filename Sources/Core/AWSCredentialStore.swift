@@ -7,6 +7,10 @@ actor AWSCredentialStore {
     private var cachedCredentials: AWSTemporaryCredentials?
     private var refreshTask: Task<AWSTemporaryCredentials, Error>?
 
+    /// 取凭证的调用方常常是不可取消的等待（非结构化 Task 不继承取消），
+    /// 所以必须由这一侧保证有界：业务侧的 fetcher 若自己挂住，这里兜底。
+    private let fetchTimeout: TimeInterval = 30
+
     init(refreshAhead: TimeInterval, fetcher: @escaping AWSCredentialsFetcher) {
         self.refreshAhead = refreshAhead
         self.fetcher = fetcher
@@ -24,10 +28,19 @@ actor AWSCredentialStore {
         }
 
         let fetcher = self.fetcher
+        let timeout = fetchTimeout
         let task = Task<AWSTemporaryCredentials, Error> {
             do {
-                return try await fetcher()
+                return try await AWSTimeout.run(
+                    seconds: timeout,
+                    onTimeout: Self.timeoutError(seconds: timeout)
+                ) {
+                    try await fetcher()
+                }
             } catch {
+                if error is CancellationError {
+                    throw error
+                }
                 throw AWSUploaderError.credentialFetchFailed(error)
             }
         }
@@ -55,6 +68,17 @@ actor AWSCredentialStore {
     private func isValid(_ credentials: AWSTemporaryCredentials) -> Bool {
         credentials.expiration.timeIntervalSinceNow > refreshAhead
             && Self.hasRequiredValues(credentials)
+    }
+
+    private static func timeoutError(seconds: TimeInterval) -> Error {
+        NSError(
+            domain: "AWSUploader",
+            code: -3,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Fetching temporary AWS credentials timed out after \(Int(seconds))s."
+            ]
+        )
     }
 
     private static func hasRequiredValues(_ credentials: AWSTemporaryCredentials) -> Bool {

@@ -7,6 +7,7 @@ actor AWSRegistrationCoordinator {
     private let utilityKey: String
     private var registrationTask: Task<Void, Error>?
     private var registered = false
+    private let registrationTimeout: TimeInterval = 30
 
     init(
         configuration: AWSUploadConfiguration,
@@ -29,40 +30,86 @@ actor AWSRegistrationCoordinator {
     }
 
     private func registerIfNeeded() async throws {
+        let task: Task<Void, Error>
         if let registrationTask {
-            return try await registrationTask.value
-        }
-
-        let configuration = self.configuration
-        let credentialProvider = self.credentialProvider
-        let utilityKey = self.utilityKey
-        let task = Task<Void, Error> {
-            let serviceConfiguration = try Self.makeServiceConfiguration(
-                configuration: configuration,
-                credentialProvider: credentialProvider
-            )
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                AWSS3TransferUtility.register(
-                    with: serviceConfiguration,
-                    forKey: utilityKey
-                ) { error in
-                    if let error {
-                        continuation.resume(throwing: AWSUploaderError.registrationFailed(error))
-                    } else {
-                        continuation.resume()
-                    }
-                }
+            task = registrationTask
+        } else {
+            let configuration = self.configuration
+            let credentialProvider = self.credentialProvider
+            let utilityKey = self.utilityKey
+            let timeout = self.registrationTimeout
+            task = Task<Void, Error> {
+                let serviceConfiguration = try Self.makeServiceConfiguration(
+                    configuration: configuration,
+                    credentialProvider: credentialProvider
+                )
+                try await Self.register(
+                    serviceConfiguration: serviceConfiguration,
+                    utilityKey: utilityKey,
+                    timeout: timeout
+                )
             }
+            registrationTask = task
         }
-        registrationTask = task
 
         do {
             try await task.value
             registered = true
             registrationTask = nil
         } catch {
-            registrationTask = nil
+            // 等待方被取消不代表注册本身失败，共享 task 留给其他等待方；
+            // 只有注册真的失败才清空，好让下次调用能重新注册
+            if !(error is CancellationError) {
+                registrationTask = nil
+            }
             throw error
+        }
+    }
+
+    /// `AWSS3TransferUtility.register` 的 completionHandler 最终是在后台 URLSession 的
+    /// `getTasksWithCompletionHandler` 回调里被调用的（见 AWSS3TransferUtility.m 的 `recover:`）。
+    /// App 挂起期间这个回调不保证到达，没有超时就会让 continuation 永久悬挂，
+    /// 进而拖死整条上传链路。
+    ///
+    /// 另外 SDK 把同一个 completionHandler 同时交给了 `init` 和 `recover:`，
+    /// 存在被调用两次的可能 —— 裸 continuation 遇到会直接崩，`AWSContinuationBox` 顺带拆掉这个雷。
+    private static func register(
+        serviceConfiguration: AWSServiceConfiguration,
+        utilityKey: String,
+        timeout: TimeInterval
+    ) async throws {
+        let box = AWSContinuationBox<Void>()
+
+        let timer = Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            } catch {
+                return
+            }
+            let error = NSError(
+                domain: "AWSUploader",
+                code: -2,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Registering the S3 transfer utility timed out after \(Int(timeout))s."
+                ]
+            )
+            box.fail(AWSUploaderError.registrationFailed(error))
+        }
+        defer { timer.cancel() }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            guard box.install(continuation) else { return }
+            AWSS3TransferUtility.register(
+                with: serviceConfiguration,
+                forKey: utilityKey
+            ) { error in
+                if let error {
+                    box.fail(AWSUploaderError.registrationFailed(error))
+                } else {
+                    box.succeed(())
+                }
+            }
         }
     }
 
