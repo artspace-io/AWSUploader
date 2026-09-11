@@ -8,6 +8,11 @@ public final class AWSUploader {
     private let registrationCoordinator: AWSRegistrationCoordinator
     private let uploadRegistry = AWSUploadRegistry()
 
+    /// 本实例使用的 transfer utility key，也就是后台 URLSession 身份的来源。
+    /// 暴露出来供调用方排查问题 —— 它**必须跨启动稳定**，冷启动两次打出来应当一模一样。
+    /// 库本身不做日志，要核对请在调用方打印它。
+    public let utilityKey: String
+
     public init(
         configuration: AWSUploadConfiguration,
         credentialsFetcher: @escaping AWSCredentialsFetcher
@@ -19,12 +24,15 @@ public final class AWSUploader {
         )
         self.credentialStore = credentialStore
         let provider = AWSDynamicCredentialsProvider(credentialStore: credentialStore)
+        let utilityKey = AWSUtilityKey.makeUtilityKey(configuration: configuration)
+        self.utilityKey = utilityKey
         registrationCoordinator = AWSRegistrationCoordinator(
             configuration: configuration,
             credentialProvider: provider,
-            utilityKey: "com.artspace.AWSUploader.\(UUID().uuidString)"
+            utilityKey: utilityKey
         )
     }
+
 
     public func upload(
         data: Data,

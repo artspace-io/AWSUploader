@@ -7,18 +7,31 @@ public struct AWSUploadConfiguration: Sendable {
     public let requestTimeout: TimeInterval
     public let resourceTimeout: TimeInterval
 
+    /// 后台 URLSession 标识符的后缀。留空时由 `bucket` + `region` 推导。
+    ///
+    /// 只有在**同一个 App 内需要多个 bucket/region 完全相同、但要各自独立的
+    /// AWSUploader** 时才需要显式指定：标识符相同的两个实例会共用同一个
+    /// transfer utility（也就共用先注册那一方的凭证 provider）。
+    ///
+    /// 它决定的是后台 session 的身份，**必须跨启动稳定**。
+    /// 千万不要传 UUID 之类每次启动都变的值 —— 那会让每次启动都遗弃一个后台 session，
+    /// 并在传输记录库里留下永远不会被回收的孤儿行。
+    public let sessionIdentifierSuffix: String?
+
     public init(
         bucket: String,
         region: String,
         credentialRefreshAhead: TimeInterval = 300,
         requestTimeout: TimeInterval = 30,
-        resourceTimeout: TimeInterval = 100
+        resourceTimeout: TimeInterval = 100,
+        sessionIdentifierSuffix: String? = nil
     ) {
         self.bucket = bucket
         self.region = region
         self.credentialRefreshAhead = credentialRefreshAhead
         self.requestTimeout = requestTimeout
         self.resourceTimeout = resourceTimeout
+        self.sessionIdentifierSuffix = sessionIdentifierSuffix
     }
 }
 
